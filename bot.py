@@ -7,12 +7,14 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
-# Данные берем из переменных Bothost
+# Берем данные из панели Bothost
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) 
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+# Инициализация с учетом версии 3.7.0+
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 DB_NAME = "dick_game.db"
 
@@ -91,21 +93,6 @@ async def top_callback(callback: CallbackQuery):
     text = "🏆 ТОП-10:\n" + "\n".join([f"{i+1}. @{r[0]} - {r[1]} см" for i, r in enumerate(rows)])
     await callback.message.answer(text)
     await callback.answer()
-
-@dp.message(Command("promo"))
-async def use_promo(message: Message, command: CommandObject):
-    if message.chat.type != 'private': return
-    code = command.args
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM promo_codes WHERE code = ?', (code,))
-    pr = cursor.fetchone()
-    if pr:
-        update_user(user_id=message.from_user.id, dick_size=get_user(message.from_user.id)[2]+pr[1])
-        await message.answer("✅ Код активирован!")
-    else:
-        await message.answer("❌ Код не найден.")
-    conn.close()
 
 async def main():
     init_db()
