@@ -6,7 +6,7 @@ from aiogram.types import Message
 from aiogram.filters import CommandStart
 
 # Railway сам подставит это значение из настроек Variables
-TOKEN = os.getenv("8241678987:AAG4Z8YaYTFTOT12hNVN9PG6Z3wPjzhSCNg")
+TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
     print("Ошибка: Токен BOT_TOKEN не найден в переменных окружения!")
