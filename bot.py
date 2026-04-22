@@ -1,144 +1,78 @@
 import os
-import random
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
+from supabase import create_client, Client
 
+# ДАННЫЕ ИЗ ТВОЕГО СКРИПТА
+SB_URL = 'https://wbkygibviddkdjxbahbg.supabase.co'
+SB_KEY = 'sb_publishable_l5wIAt6RrAl4Uo8uZKerRQ_xBYDS-Kv'
 TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = 6176762600
+
+# Инициализация Supabase и Бота
+supabase: Client = create_client(SB_URL, SB_KEY)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Временное хранилище игр (в продакшене лучше использовать Redis)
-user_games = {}
-
-def get_main_keyboard():
-    builder = InlineKeyboardBuilder()
-    # Эмодзи-игры из вашего первого запроса
-    builder.row(
-        *[types.InlineKeyboardButton(text=em, callback_data=f"game_{i}") 
-          for i, em in enumerate(["🏀", "⚽", "🎯", " bowling", "🎲", "🎰"])]
-    )
-    builder.row(
-        types.InlineKeyboardButton(text="🚀 Быстрые", callback_data="fast"),
-        types.InlineKeyboardButton(text="Режимы 💣", callback_data="modes"),
-    )
-    builder.row(types.InlineKeyboardButton(text="🕹 Играть в WEB", url="https://google.com"))
-    builder.row(types.InlineKeyboardButton(text="✏️ Изменить ставку", callback_data="edit_bet"))
-    return builder.as_markup()
-
-def get_modes_keyboard():
-    builder = InlineKeyboardBuilder()
-    modes = [
-        ("💣 Мины", "start_mines"), ("💎 Алмазы", "none"),
-        ("⛰ Башня", "none"), ("💰 Золото", "none"),
-        ("🐸 Квак", "none"), ("📈 HiLo", "none"),
-        ("🃏 21(Очко)", "none"), ("🛶 Пирамида", "none")
-    ]
-    for i in range(0, len(modes), 2):
-        builder.row(
-            types.InlineKeyboardButton(text=modes[i][0], callback_data=modes[i][1]),
-            types.InlineKeyboardButton(text=modes[i+1][0], callback_data=modes[i+1][1])
-        )
-    builder.row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu"))
-    return builder.as_markup()
-
-# --- Логика игры МИНЫ ---
-
-def create_mines_keyboard(user_id):
-    game = user_games[user_id]
-    builder = InlineKeyboardBuilder()
-    
-    for i in range(15): # Поле 3x5 как в видео
-        if i in game['opened']:
-            text = "💎" if i not in game['mines'] else "💥"
-            cb_data = "ignore"
-        else:
-            text = "❓"
-            cb_data = f"mine_{i}"
-        builder.add(types.InlineKeyboardButton(text=text, callback_data=cb_data))
-    
-    builder.adjust(5)
-    builder.row(types.InlineKeyboardButton(text="💰 Забрать выигрыш", callback_data="cashout"))
-    return builder.as_markup()
-
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    await message.answer(
-        "🎮 **ДАВАЙ НАЧНЕМ ИГРАТЬ!**\n\n💰 **Баланс:** 190 m₵\n💸 **Ставка:** 10 m₵",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
+    user_tg = message.from_user.username
 
-@dp.callback_query(F.data == "modes")
-async def show_modes(callback: types.CallbackQuery):
-    await callback.message.edit_text("Выбери игру и начинай!", reply_markup=get_modes_keyboard())
+    if not user_tg:
+        await message.answer("❌ **Ошибка:** У вас в настройках Telegram не установлен 'Username' (@username). Установите его, чтобы бот смог найти ваш аккаунт на сайте.")
+        return
 
-@dp.callback_query(F.data == "start_mines")
-async def start_mines(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    # Генерируем 3 мины на 15 клеток
-    mines = random.sample(range(15), 3)
-    user_games[user_id] = {
-        'mines': mines,
-        'opened': [],
-        'win_step': 0,
-        'bet': 10
-    }
-    
-    await callback.message.edit_text(
-        "💣 **Мины - игра идет**\n\nСтавка: 10 m₵\nВыигрыш: 0 m₵",
-        reply_markup=create_mines_keyboard(user_id),
-        parse_mode="Markdown"
-    )
-
-@dp.callback_query(F.data.startswith("mine_"))
-async def process_mine(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id not in user_games: return
-    
-    cell = int(callback.data.split("_")[1])
-    game = user_games[user_id]
-    
-    if cell in game['mines']:
-        # Проигрыш
-        game['opened'] = list(range(15)) # Открываем всё
-        await callback.message.edit_text(
-            "💥 **Мины - Проигрыш!**\n\nВы попали на мину!",
-            reply_markup=None
-        )
-        await asyncio.sleep(3)
-        await show_modes(callback)
-        del user_games[user_id]
-    else:
-        # Успешный ход
-        game['opened'].append(cell)
-        game['win_step'] += 1
-        win_amount = game['bet'] * (1.2 ** game['win_step'])
+    try:
+        # Ищем в таблице 'profiles', где в колонке 'TelegramUSER' записан юзернейм игрока
+        # eq('TelegramUSER', user_tg) — это и есть поиск совпадения
+        res = supabase.table("profiles").select("*").eq("TelegramUSER", user_tg).execute()
         
-        try:
-            await callback.message.edit_text(
-                f"💣 **Мины - игра идет**\n\nСтавка: {game['bet']} m₵\nВыигрыш: {win_amount:.2f} m₵",
-                reply_markup=create_mines_keyboard(user_id),
-                parse_mode="Markdown"
+        if res.data and len(res.data) > 0:
+            user_data = res.data[0]
+            balance = user_data.get('score', 0)
+            await message.answer(
+                f"✅ **Аккаунт найден!**\n\n"
+                f"👤 **Профиль:** {user_data.get('username')}\n"
+                f"💰 **Баланс:** {balance} $\n\n"
+                f"Теперь вы можете писать сюда любые вопросы, поддержка их получит!"
             )
-        except TelegramBadRequest:
-            pass # Если сообщение не изменилось
-    await callback.answer()
+        else:
+            await message.answer(
+                f"🔍 **Аккаунт не найден.**\n\n"
+                f"Я искал юзера `@{user_tg}` в колонке `TelegramUSER`, но совпадений нет.\n"
+                f"Убедитесь, что на сайте в профиле указан ваш верный ник Telegram."
+            )
+            
+    except Exception as e:
+        print(f"Ошибка Supabase: {e}")
+        await message.answer("👋 Привет! Напиши свой вопрос, и я передам его администратору.")
 
-@dp.callback_query(F.data == "cashout")
-async def cashout(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id in user_games:
-        game = user_games[user_id]
-        win = game['bet'] * (1.2 ** game['win_step'])
-        await callback.answer(f"✅ Вы забрали {win:.2f} m₵!", show_alert=True)
-        del user_games[user_id]
-        await show_modes(callback)
+@dp.message(F.text)
+async def handle_msg(message: types.Message):
+    # Игнорируем команду старт
+    if message.text.startswith("/start"): 
+        return
+
+    # Пересылка сообщения админу (тебе)
+    user = message.from_user
+    report = (
+        f"🆘 **НОВОЕ ОБРАЩЕНИЕ**\n\n"
+        f"👤 От: @{user.username or 'скрыт'}\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"💬 Сообщение: {message.text}"
+    )
+
+    try:
+        await bot.send_message(ADMIN_ID, report, parse_mode="Markdown")
+        await message.answer("🚀 Сообщение отправлено саппорту! Ожидайте ответа прямо здесь.")
+    except Exception as e:
+        await message.answer("❌ Ошибка отправки сообщения.")
 
 async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
