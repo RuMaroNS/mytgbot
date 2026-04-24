@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from supabase import create_client, Client
 
-# Настройка логирования (чтобы видеть ошибки в консоли)
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
 # ========== КОНФИГУРАЦИЯ ==========
@@ -18,15 +18,24 @@ supabase: Client = create_client(SB_URL, SB_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ========== ФУНКЦИЯ ВХОДА С ПОДСТАНОВКОЙ @ ==========
 
-def get_profile(tg_id):
-    """Ищем юзера в profiles по TelegramUSER"""
-    res = supabase.table("profiles").select("*").eq("TelegramUSER", str(tg_id)).execute()
+def get_profile_by_username(tg_user_obj):
+    """
+    Получает объект юзера из ТГ, берет его username,
+    добавляет @ и ищет в таблице profiles.
+    """
+    if not tg_user_obj or not tg_user_obj.username:
+        return None
+    
+    # Формируем строку с собакой: R0bONe -> @R0bONe
+    username_with_dog = f"@{tg_user_obj.username}"
+    
+    res = supabase.table("profiles").select("*").eq("TelegramUSER", username_with_dog).execute()
     return res.data[0] if res.data else None
 
 def get_item_details(item_name):
-    """Берем инфу о предмете (редкость и т.д.) из items_meta"""
+    """Берем инфу из items_meta"""
     res = supabase.table("items_meta").select("*").eq("name", item_name).execute()
     return res.data[0] if res.data else None
 
@@ -34,180 +43,103 @@ def get_item_details(item_name):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    user = get_profile(message.from_user.id)
+    user = get_profile_by_username(message.from_user)
+    
     kb = ReplyKeyboardBuilder()
     kb.row(types.KeyboardButton(text="👤 Профиль"), types.KeyboardButton(text="📦 Кейсы"))
     
     if user:
-        await message.answer(f"✅ Доступ разрешен! С возвращением, {user['username']}.", 
-                             reply_markup=kb.as_markup(resize_keyboard=True))
+        await message.answer(f"✅ Успешный вход! Твой аккаунт: **{user['username']}**", 
+                             reply_markup=kb.as_markup(resize_keyboard=True),
+                             parse_mode="Markdown")
     else:
-        await message.answer(f"❌ Твой ID `{message.from_user.id}` не найден в таблице profiles.\n"
-                             f"Укажи его в колонке TelegramUSER, чтобы бот тебя узнал.")
+        # Если не нашел, выводим что именно бот искал для проверки
+        search_term = f"@{message.from_user.username}" if message.from_user.username else "нет юзернейма"
+        await message.answer(f"❌ Аккаунт не найден.\nБот искал в БД текст: `{search_term}`\n\n"
+                             f"Убедись, что в колонке TelegramUSER в Supabase написано именно так.",
+                             parse_mode="Markdown")
 
 @dp.message(F.text == "👤 Профиль")
 async def cmd_profile(message: types.Message):
-    user = get_profile(message.from_user.id)
+    user = get_profile_by_username(message.from_user)
     if not user:
-        return await message.answer("Сначала привяжи TelegramID в базе данных!")
+        return await message.answer("Ошибка: профиль не найден. Нажми /start")
     
     score = user.get('score', 0)
-    inv_count = len(user.get('inventory', []))
+    inv = user.get('inventory', [])
+    inv_count = len(inv) if isinstance(inv, list) else 0
     
-    msg_text = (
+    await message.answer(
         f"👤 **Профиль: {user['username']}**\n"
         f"━━━━━━━━━━━━━━\n"
-        f"💰 **Баланс (score):** {score} 💎\n"
-        f"🎒 **Инвентарь:** {inv_count} шт.\n\n"
-        f"Твой ID: `{message.from_user.id}`"
+        f"💰 **Баланс:** {score} score\n"
+        f"🎒 **Инвентарь:** {inv_count} шт.\n"
+        f"🔑 **Юзер:** @{message.from_user.username}",
+        parse_mode="Markdown"
     )
-    await message.answer(msg_text, parse_mode="Markdown")
 
 @dp.message(F.text == "📦 Кейсы")
 async def cmd_cases(message: types.Message):
     res = supabase.table("cases_meta").select("*").execute()
     kb = InlineKeyboardBuilder()
-    
     for c in res.data:
         kb.row(types.InlineKeyboardButton(
-            text=f"Открыть {c['name']} — {c['price']} 💰", 
+            text=f"{c['name']} — {c['price']} 💰", 
             callback_data=f"buy_{c['id']}_{c['price']}"
         ))
-    
-    await message.answer("🎁 Выбери кейс для прокрутки в слотах:", reply_markup=kb.as_markup())
+    await message.answer("🎁 Выбери кейс:", reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def handle_opening(callback: types.CallbackQuery):
     _, c_id, price = callback.data.split("_")
     price = int(price)
-    user = get_profile(callback.from_user.id)
+    user = get_profile_by_username(callback.from_user)
 
     if not user or user.get('score', 0) < price:
         return await callback.answer("Недостаточно score! ❌", show_alert=True)
 
-    # 1. Списание баланса
+    # 1. Списание
     new_score = user['score'] - price
     supabase.table("profiles").update({"score": new_score}).eq("id", user['id']).execute()
 
-    # 2. Анимация СЛОТОВ
+    # 2. Слоты
     dice_msg = await callback.message.answer_dice(emoji="🎰")
-    await callback.message.edit_text(f"🎰 Кейс «{c_id}» запущен...")
-    
-    await asyncio.sleep(3.5) # Время анимации в ТГ
+    await callback.message.edit_text(f"🎰 Открываем кейс ID:{c_id}...")
+    await asyncio.sleep(3.5)
 
-    # 3. Выбор лута из JSON кейса
+    # 3. Лут
     case_data = supabase.table("cases_meta").select("loot").eq("id", c_id).single().execute()
     loot_pool = case_data.data.get('loot', [])
 
-    if not loot_pool:
-        return await callback.message.answer("Ошибка: в этом кейсе нет лута (пустой JSON)!")
-
-    # Рандом по шансам
-    winning_loot = random.choices(
-        population=loot_pool,
-        weights=[float(i.get('chance', 1)) for i in loot_pool],
-        k=1
-    )[0]
+    win = random.choices(loot_pool, weights=[float(i.get('chance', 1)) for i in loot_pool], k=1)[0]
     
-    item_name = winning_loot['name']
-
-    # 4. Получаем данные о предмете из items_meta
-    details = get_item_details(item_name)
+    # 4. Подтягиваем инфу из items_meta
+    details = get_item_details(win['name'])
+    d_name = details.get('display_name', win['name']) if details else win['name']
     rarity = details.get('rarity', 'common') if details else 'common'
-    d_name = details.get('display_name', item_name) if details else item_name
 
-    # 5. Обновляем инвентарь (массив объектов id + char)
+    # 5. Запись в инвентарь
     current_inv = user.get('inventory', [])
     if not isinstance(current_inv, list): current_inv = []
     
-    new_entry = {
-        "id": str(random.randint(1000000000, 9999999999)), 
-        "char": item_name
-    }
-    current_inv.append(new_entry)
+    current_inv.append({
+        "id": str(random.randint(1111111111, 9999999999)), 
+        "char": win['name']
+    })
     
     supabase.table("profiles").update({"inventory": current_inv}).eq("id", user['id']).execute()
 
-    # 6. Результат
     await callback.message.answer(
-        f"🎉 **ВЫПАЛО:** {d_name}\n"
-        f"━━━━━━━━━━━━━━\n"
+        f"🎊 **ВЫПАЛО:** {d_name}\n"
         f"💎 Редкость: `{rarity.upper()}`\n"
-        f"💰 Остаток score: {new_score}\n"
-        f"🎰 Слоты показали: {dice_msg.dice.value}",
+        f"💰 Баланс: {new_score} score",
         parse_mode="Markdown"
     )
 
 async def main():
-    print("=== Бот запущен ( profiles / cases_meta / items_meta ) ===")
+    print("Бот запущен. Поиск по @username активен.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-async def cmd_profile(message: types.Message):
-    user = get_user(message.from_user.id)
-    if not user:
-        return await message.answer("Сначала привяжи аккаунт в Supabase!")
     
-    balance = user.get('balance', 0)
-    # ЗДЕСЬ БЫЛА ОШИБКА ОТСТУПА:
-    msg_text = (
-        f"👤 **Твой профиль**\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"💰 **Баланс:** {balance} $\n\n"
-        f"Колонка TelegramUSER: `{message.from_user.id}`"
-    )
-    
-    kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="🎒 Инвентарь", callback_data="view_inv"))
-    await message.answer(msg_text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-
-@dp.message(F.text == "📦 Кейсы")
-async def cmd_cases(message: types.Message):
-    res = supabase.table("cases").select("*").execute()
-    kb = InlineKeyboardBuilder()
-    for c in res.data:
-        kb.row(types.InlineKeyboardButton(text=f"{c['name']} — {c['price']}$", callback_data=f"buy_{c['id']}_{c['price']}"))
-    await message.answer("🎁 Выбери кейс для прокрутки:", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("buy_"))
-async def handle_buy(callback: types.CallbackQuery):
-    _, c_id, price = callback.data.split("_")
-    price = int(price)
-    user = get_user(callback.from_user.id)
-
-    if not user or user['balance'] < price:
-        return await callback.answer("Недостаточно денег!", show_alert=True)
-
-    # Списываем бабки
-    new_balance = user['balance'] - price
-    supabase.table("users").update({"balance": new_balance}).eq("id", user['id']).execute()
-
-    # СЛОТЫ ТГ
-    msg = await callback.message.answer_dice(emoji="🎰")
-    await callback.message.edit_text(f"🎰 Крутим кейс {c_id}...")
-    
-    await asyncio.sleep(3.0) # Ждем анимацию
-
-    loot_pool = get_loot(c_id)
-    if not loot_pool:
-        return await callback.message.answer("Кейс пустой в БД!")
-
-    # Рандом по шансам
-    win = random.choices(loot_pool, weights=[i['chance'] for i in loot_pool], k=1)[0]
-
-    # В инвентарь
-    supabase.table("inventory").insert({"user_id": user['id'], "item_name": win['name']}).execute()
-
-    await callback.message.answer(
-        f"🎊 **ВЫПАЛО:** {win['name']}\n"
-        f"💰 Остаток: {new_balance} $\n"
-        f"🎰 Значение слотов: {msg.dice.value}",
-        parse_mode="Markdown"
-    )
-
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
