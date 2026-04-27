@@ -1,3 +1,2 @@
 python-telegram-bot
-g4f
-curl_cffi
+huggingface_hub
