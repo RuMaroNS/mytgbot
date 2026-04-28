@@ -11,7 +11,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 supabase: Client = create_client(URL, KEY)
 
-# --- АВТО-ЗАПОМИНАЛКА (Лички, Группы, Каналы) ---
+# --- АВТО-ЗАПОМИНАЛКА ---
 @dp.message()
 @dp.my_chat_member()
 @dp.channel_post()
@@ -23,48 +23,51 @@ async def register_any_chat(event):
         chat_id = event.message.chat.id
         
     if chat_id:
-        # Пихаем любой ID в одну таблицу. Supabase сам поймет, если он уже там есть.
         try:
             supabase.table("active_chats").upsert({"chat_id": chat_id}).execute()
         except:
             pass
 
-# --- РАССЫЛКА ПО СПИСКУ ---
+# --- РАССЫЛКА (ЧИСТЫЙ ТЕКСТ) ---
 async def broadcast_loop():
-    print("📡 Мониторинг запущен. База 'active_chats' в деле.")
+    print("📡 Бот-ретранслятор запущен. Жду данные из Supabase...")
     while True:
         try:
-            # 1. Чекаем ивент
+            # 1. Получаем новые ивенты
             res = supabase.table("game_events").select("*").eq("status", "new").execute()
             
             if res.data:
-                # 2. Достаем ВООБЩЕ ВСЕ сохраненные ID
+                # 2. Получаем список всех чатов
                 chats_res = supabase.table("active_chats").select("chat_id").execute()
                 targets = [c['chat_id'] for c in chats_res.data]
 
                 for ev in res.data:
-                    event_name = ev['event_name']
-                    text = f"🚨 ЩЕЛЧОК ('{event_name}') БЫЛ ЗАПУЩЕН\n\nЗаходим в игру🎮"
-
-                    print(f"📢 Рассылаю '{event_name}' на {len(targets)} чатов/личек...")
+                    # БЕРЕМ ТЕКСТ КАК ОН ЕСТЬ, БЕЗ ПРИПИСОК
+                    raw_text = ev['event_name']
+                    
+                    print(f"📢 Отправляю: {raw_text}")
                     
                     for tid in targets:
                         try:
-                            await bot.send_message(tid, text)
-                        except:
-                            continue # Если забанили — пофиг, идем дальше
+                            # Отправляем чистый текст из базы
+                            await bot.send_message(tid, raw_text)
+                        except Exception as e:
+                            print(f"❌ Ошибка отправки в {tid}: {e}")
+                            continue
 
-                    # 3. Закрываем ивент
+                    # 3. Помечаем как выполненное
                     supabase.table("game_events").update({"status": "done"}).eq("id", ev['id']).execute()
-                    print(f"🏁 Рассылка завершена.")
+                    print(f"✅ Готово.")
 
         except Exception as e:
-            print(f"⚠️ Ошибка: {e}")
+            print(f"⚠️ Ошибка цикла: {e}")
         
         await asyncio.sleep(5)
 
 async def main():
+    # Запускаем цикл рассылки фоном
     asyncio.create_task(broadcast_loop())
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
